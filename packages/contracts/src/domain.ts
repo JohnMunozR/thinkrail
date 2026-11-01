@@ -5,6 +5,7 @@ export interface SessionStateRecord {
 	workspaceId: string;
 	projectId: string;
 	state: SessionState;
+	title?: string;
 	firstPrompt?: string;
 }
 
@@ -1083,7 +1084,8 @@ export type DetectedAccountSource =
 	| "github-copilot"
 	| "copilot-cli"
 	| "kimi-cli"
-	| "grok-build";
+	| "grok-build"
+	| "antigravity";
 
 export interface DetectedAccount {
 	providerId: string;

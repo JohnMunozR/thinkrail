@@ -5,7 +5,7 @@ status: active
 title: agent — in-process pi sessions
 parent: module-server
 depends-on: [module-contracts, module-pi-delegation, module-pi-subagents, module-pi-background-commands]
-references: [module-spec-graph, central-integration, submodule-server-extensions, submodule-server-agent-packages]
+references: [module-spec-graph, central-integration, submodule-server-extensions, submodule-server-agent-packages, submodule-server-agent-antigravity]
 tags: [pi]
 ---
 
@@ -66,7 +66,11 @@ re-opened transcripts provider-valid.
     `provider.status` + in-app login — lives in the sibling `auth` module (which consumes the shared
     `usePiRuntime` callback), **not** here.
 
-    Candidate preparation takes only the reviewed opaque Central path set, builds a fresh runtime, applies the
+    Candidate preparation takes only the reviewed opaque Central path set, builds a fresh runtime,
+    registers the built-in `antigravity` provider ([[submodule-server-agent-antigravity]] — Google Antigravity
+    OAuth subscription provider with PKCE loopback/paste sign-in and Cloud Code Assist streaming) on every
+    `ModelRuntime` generation before `captureProviderStatus(runtime)` captures the pre-opaque
+    `providerStatusIds` allowlist, applies the
     composition root's invariant generation initializer (the source-mode e2e host uses it for its gated fake
     providers), records that pre-opaque provider-id allowlist for `provider.status` together with each id's
     display name at that moment, and then applies the opaque
@@ -126,7 +130,9 @@ re-opened transcripts provider-valid.
     the provider's error text. Direct API keys and other subscriptions keep pi's catalog: no listing was verified to
     agree with pi's aliases there.
   - `modelDefaults` — `preferredDefaultModel(available)`: pi's `defaultModelPerProvider` in pi's order,
-    then any available model whose id is one of those defaults, else the first available model. Pi does
+    then `HOST_DEFAULT_MODEL_PER_PROVIDER` by `(provider, id)` (mapping `antigravity` to `gemini-4-argon`
+    so host-registered providers resolve their preferred default before generic model-id matching), then any
+    available model whose id is one of pi's defaults, else the first available model. Pi does
     not export that map, so the host mirrors it under a parity test against the installed dist; the first
     pass is what pi's own `findInitialModel` would pick. The same-id pass covers a provider whose own
     default the account filter removed: Sign in with ChatGPT serves `openai` models from the
@@ -279,7 +285,12 @@ re-opened transcripts provider-valid.
     flight; needs-input is never held. The command change listener and the delegation lifecycle listener
     republish the parent's state on a coalesced `setImmediate`, after the same-tick completion delivery
     that wakes the parent has already flipped it to running — so the last finishing child never flashes
-    the dot before the woken turn. A completion that does not wake the parent (user stop) releases the hold
+    the dot before the woken turn. The portable packages own that same-tick wake, also while their
+    post-settle idle flush is pending ([[module-pi-subagents]] Result delivery). Queuing the republish
+    behind that flush's `setTimeout(0)` instead was rejected: it leans on cross-module timer order and
+    still flashes whenever the flush runs late. The one remaining flash is a wake pi defers: a result
+    landing during the `agent_settled` emission, after this listener published idle. Only a settle handler
+    could deliver one there; ThinkRail's are synchronous and command exits arrive as I/O callbacks. A completion that does not wake the parent (user stop) releases the hold
     on that republish; a delivery gated by a reload or trash hold also releases first, and its later wake
     clears the unread again. Disk-only sessions have no live work and never hold. The same fact is published as
     `backgroundWork`, so clients show the idle chat as working (contracts' `isSessionWorking`) instead of
@@ -770,7 +781,8 @@ re-opened transcripts provider-valid.
     ignore floating-point noise) are missing, never as a negative correction. Forked children
     (header `parentSession`) are skipped because their copied history carries the parent's own spend.
     A host-injected `setSubagentConcurrencyResolver` supplies each service's per-chat
-    limit at creation, and `refreshSubagentConcurrency(workspaceId?)` re-resolves and live-resizes the
+    limit at creation (`null`, the default, leaves new services on the core limit), and
+    `refreshSubagentConcurrency(workspaceId?)` re-resolves and live-resizes the
     cached services (core `setMaxConcurrentPerParent`) after a global or workspace limit change; `subagentsFor(workspaceId, isEnabled, canDeliverCompletion)` creates one retained portable
     `Subagents` owner per parent; its extension is injected on every resource load. A host-injected
     `setSubagentsEnabledResolver` maps that
@@ -1159,7 +1171,11 @@ re-opened transcripts provider-valid.
   set; this module owns compose-time filtering and live activation timing);
   the `set_title` seam (`setTitleToolHost` + `TitleToolHost`/`SET_TITLE_TOOL_NAME`/`SetTitleParams`);
   the bundled-artifact seam (`registerBundledRuntime` +
-  `BundledExtensions`/`BundledExtensionFactory`).
+  `BundledExtensions`/`BundledExtensionFactory`). The publishers, resolvers and handlers above that
+  `createServer` installs return to their module default at its `stop()` — no-op publishers and, via
+  `null`, the default resolver policy, no concurrency resolver, and the unavailable `request_review` /
+  `resolve_comment` / `set_title` handlers. The PI runtime, its factories, the session manager factory
+  and `registerBundledRuntime` are not reset by `stop()`; whoever configures them restores them.
 - **Allowed deps:** `@earendil-works/pi-coding-agent` (runtime); `@earendil-works/pi-ai` (types + test
   fixtures + **pure catalog helpers value-imported from the package root** — today exactly
   `getSupportedThinkingLevels` + `clampThinkingLevel`, data-only projections over `Model`; *dispatch*
@@ -1265,6 +1281,15 @@ normalized title is already current. A live session writes through `AgentSession
 session opens its exact transcript with `SessionManager.open(...).appendSessionInfo(...)` without attaching an
 agent or resolving a model. Both paths publish the same `session_info_changed` Pi event, while
 `SessionSummary.title` remains the hydration projection.
+
+**The name rides the state record.** Every `SessionStateRecord` the manager builds carries `title`: a live
+entry reads `AgentSession.sessionName`, and it is part of `publishEntryState`'s dedupe key, so the publish
+that follows every registered-session event — a rename's `session_info_changed` included — pushes the new
+name; a disk row reads the manager the collector has just opened (not the listing's `SessionInfo.name`,
+which an awaited discovery can leave older than the transcript read beside it), and a disk-only rename
+publishes that chat's complete record (`diskStateRecord`, state + title + first prompt) after its event.
+`""` means unnamed. It costs no transcript read — the collector and the rename already hold the manager —
+and the name is read as pi stores it, never re-validated by the write rule.
 
 The guarded write remains authoritative across the async race. `onlyIfUnnamed` performs the check immediately
 beside the append and is the compare-and-set the `set_title` handler uses (its `false` return is how the
